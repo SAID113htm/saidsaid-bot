@@ -1,5 +1,4 @@
 import Database from 'better-sqlite3';
-import * as path from 'path';
 
 export interface Trade {
   id?: number;
