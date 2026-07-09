@@ -1,4 +1,5 @@
-import Database from 'better-sqlite3';
+import * as fs from 'fs';
+import * as path from 'path';
 
 export interface Trade {
   id?: number;
@@ -46,97 +47,71 @@ export interface TradingStats {
 }
 
 export class TradeDatabase {
-  private db: Database.Database;
+  private trades: Trade[] = [];
+  private filePath: string;
 
   constructor() {
-    const dbPath = path.join(__dirname, '../../trades.db');
-    this.db = new Database(dbPath);
-    this.initializeDatabase();
+    this.filePath = path.join(__dirname, '../../trades.json');
+    this.loadTrades();
   }
 
-  private initializeDatabase(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        symbol TEXT NOT NULL,
-        direction TEXT NOT NULL,
-        entry REAL NOT NULL,
-        stop_loss REAL NOT NULL,
-        take_profit REAL NOT NULL,
-        exit_price REAL,
-        lot_size REAL NOT NULL,
-        risk_percent REAL NOT NULL,
-        confidence INTEGER NOT NULL,
-        status TEXT NOT NULL DEFAULT 'OPEN',
-        profit REAL,
-        pips REAL,
-        reason TEXT,
-        notes TEXT,
-        open_time TEXT NOT NULL,
-        close_time TEXT,
-        strategy TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-      );
-      
-      CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
-      CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol);
-      CREATE INDEX IF NOT EXISTS idx_trades_open_time ON trades(open_time);
-    `);
+  private loadTrades(): void {
+    try {
+      if (fs.existsSync(this.filePath)) {
+        const data = fs.readFileSync(this.filePath, 'utf-8');
+        this.trades = JSON.parse(data);
+        console.log('✅ Loaded ' + this.trades.length + ' trades from JSON');
+      } else {
+        this.trades = [];
+        this.saveTrades();
+      }
+    } catch (error) {
+      console.error('❌ Failed to load trades:', error);
+      this.trades = [];
+    }
+  }
+
+  private saveTrades(): void {
+    try {
+      fs.writeFileSync(this.filePath, JSON.stringify(this.trades, null, 2));
+    } catch (error) {
+      console.error('❌ Failed to save trades:', error);
+    }
   }
 
   addTrade(trade: Omit<Trade, 'id'>): number {
-    const stmt = this.db.prepare(`
-      INSERT INTO trades (
-        symbol, direction, entry, stop_loss, take_profit, exit_price,
-        lot_size, risk_percent, confidence, status, profit, pips,
-        reason, notes, open_time, close_time, strategy
-      ) VALUES (
-        @symbol, @direction, @entry, @stopLoss, @takeProfit, @exitPrice,
-        @lotSize, @riskPercent, @confidence, @status, @profit, @pips,
-        @reason, @notes, @openTime, @closeTime, @strategy
-      )
-    `);
+    const id = this.trades.length > 0 
+      ? Math.max(...this.trades.map(t => t.id || 0)) + 1 
+      : 1;
 
-    const result = stmt.run({
-      symbol: trade.symbol,
-      direction: trade.direction,
-      entry: trade.entry,
-      stopLoss: trade.stopLoss,
-      takeProfit: trade.takeProfit,
-      exitPrice: trade.exitPrice || null,
-      lotSize: trade.lotSize,
-      riskPercent: trade.riskPercent,
-      confidence: trade.confidence,
-      status: trade.status,
-      profit: trade.profit || null,
-      pips: trade.pips || null,
-      reason: trade.reason,
-      notes: trade.notes || null,
-      openTime: trade.openTime,
-      closeTime: trade.closeTime || null,
-      strategy: trade.strategy,
-    });
+    const newTrade: Trade = {
+      ...trade,
+      id,
+    };
 
-    return result.lastInsertRowid as number;
+    this.trades.push(newTrade);
+    this.saveTrades();
+    return id;
   }
 
   closeTrade(id: number, exitPrice: number, status: 'WIN' | 'LOSS' | 'BREAKEVEN', profit: number, pips: number): void {
-    const stmt = this.db.prepare(`
-      UPDATE trades 
-      SET exit_price = ?, status = ?, profit = ?, pips = ?, close_time = ?
-      WHERE id = ?
-    `);
-    stmt.run(exitPrice, status, profit, pips, new Date().toISOString(), id);
+    const trade = this.trades.find(t => t.id === id);
+    if (trade) {
+      trade.exitPrice = exitPrice;
+      trade.status = status;
+      trade.profit = profit;
+      trade.pips = pips;
+      trade.closeTime = new Date().toISOString();
+      this.saveTrades();
+    }
   }
 
   getOpenTrades(): Trade[] {
-    const stmt = this.db.prepare('SELECT * FROM trades WHERE status = ?');
-    return stmt.all('OPEN') as Trade[];
+    return this.trades.filter(t => t.status === 'OPEN');
   }
 
   getTradeById(id: number): Trade | undefined {
-    const stmt = this.db.prepare('SELECT * FROM trades WHERE id = ?');
-    return stmt.get(id) as Trade | undefined;
+    return this.trades.find(t => t.id === id);
   }
 
   getStatistics(days: number = 30): TradingStats {
@@ -144,13 +119,7 @@ export class TradeDatabase {
     startDate.setDate(startDate.getDate() - days);
     const startDateStr = startDate.toISOString();
 
-    const stmt = this.db.prepare(`
-      SELECT * FROM trades 
-      WHERE open_time >= ? 
-      ORDER BY open_time DESC
-    `);
-    const trades = stmt.all(startDateStr) as Trade[];
-
+    const trades = this.trades.filter(t => t.openTime >= startDateStr);
     const closedTrades = trades.filter(t => t.status !== 'OPEN');
     const openTrades = trades.filter(t => t.status === 'OPEN');
     const winningTrades = closedTrades.filter(t => t.status === 'WIN');
@@ -285,15 +254,16 @@ export class TradeDatabase {
   }
 
   getRecentTrades(count: number = 10): Trade[] {
-    const stmt = this.db.prepare('SELECT * FROM trades ORDER BY open_time DESC LIMIT ?');
-    return stmt.all(count) as Trade[];
+    return [...this.trades]
+      .sort((a, b) => new Date(b.openTime).getTime() - new Date(a.openTime).getTime())
+      .slice(0, count);
   }
 
   formatStatistics(stats: TradingStats, days: number = 30): string {
     let text = '📊 **إحصائيات التداول - آخر ' + days + ' يوم**\n\n';
     text += '━━━━━━━━━━━━━━━━━━━\n';
     
-    text += ' **ملخص عام:**\n';
+    text += '📈 **ملخص عام:**\n';
     text += '• إجمالي الصفقات: ' + stats.totalTrades + '\n';
     text += '• صفقات مفتوحة: ' + stats.openTrades + '\n';
     text += '• صفقات مغلقة: ' + stats.closedTrades + '\n\n';
@@ -302,7 +272,7 @@ export class TradeDatabase {
     const profitEmoji = stats.totalProfit >= 0 ? '🟢' : '🔴';
     text += profitEmoji + ' الربح الكلي: $' + stats.totalProfit.toFixed(2) + '\n';
     text += '📊 إجمالي النقاط: ' + stats.totalPips.toFixed(1) + ' pips\n';
-    text += '🎯 نسبة الفوز: ' + stats.winRate.toFixed(1) + '%\n';
+    text += ' نسبة الفوز: ' + stats.winRate.toFixed(1) + '%\n';
     text += '• صفقات رابحة: ' + stats.winningTrades + '\n';
     text += '• صفقات خاسرة: ' + stats.losingTrades + '\n\n';
 
@@ -312,16 +282,16 @@ export class TradeDatabase {
     text += '• Profit Factor: ' + stats.profitFactor.toFixed(2) + '\n';
     text += '🏆 أفضل صفقة: $' + stats.bestTrade.toFixed(2) + '\n';
     text += '📉 أسوأ صفقة: $' + stats.worstTrade.toFixed(2) + '\n';
-    text += '️ Max Drawdown: $' + stats.maxDrawdown.toFixed(2) + '\n\n';
+    text += '⚠️ Max Drawdown: $' + stats.maxDrawdown.toFixed(2) + '\n\n';
 
-    text += '🔍 **التحليل التفصيلي:**\n';
+    text += ' **التحليل التفصيلي:**\n';
     text += '• أفضل زوج: ' + stats.bestSymbol + '\n';
     text += '• أسوأ زوج: ' + stats.worstSymbol + '\n';
     text += '• أفضل يوم: ' + stats.bestDay + '\n';
     text += '• أسوأ يوم: ' + stats.worstDay + '\n';
     text += '• متوسط مدة الصفقة: ' + stats.averageHoldTime.toFixed(1) + ' ساعة\n';
-    text += '🏅 أكبر سلسلة انتصارات: ' + stats.consecutiveWins + '\n';
-    text += '📉 أكبر سلسلة خسائر: ' + stats.consecutiveLosses + '\n\n';
+    text += ' أكبر سلسلة انتصارات: ' + stats.consecutiveWins + '\n';
+    text += ' أكبر سلسلة خسائر: ' + stats.consecutiveLosses + '\n\n';
 
     const grade = this.calculateGrade(stats);
     text += '⭐ **التقييم العام:** ' + grade.emoji + ' ' + grade.text + '\n';
@@ -332,14 +302,14 @@ export class TradeDatabase {
 
   private calculateGrade(stats: TradingStats): { emoji: string; text: string } {
     if (stats.closedTrades < 5) return { emoji: '🆕', text: 'جديد - تحتاج مزيد من الصفقات' };
-    if (stats.winRate >= 60 && stats.profitFactor >= 2.0) return { emoji: '🏆', text: 'ممتاز - أداء احترافي!' };
-    if (stats.winRate >= 55 && stats.profitFactor >= 1.5) return { emoji: '', text: 'جيد جداً' };
+    if (stats.winRate >= 60 && stats.profitFactor >= 2.0) return { emoji: '', text: 'ممتاز - أداء احترافي!' };
+    if (stats.winRate >= 55 && stats.profitFactor >= 1.5) return { emoji: '🌟', text: 'جيد جداً' };
     if (stats.winRate >= 50 && stats.profitFactor >= 1.2) return { emoji: '👍', text: 'جيد' };
-    if (stats.winRate >= 45) return { emoji: '⚠️', text: 'متوسط - يحتاج تحسين' };
+    if (stats.winRate >= 45) return { emoji: '️', text: 'متوسط - يحتاج تحسين' };
     return { emoji: '❌', text: 'ضعيف - راجع استراتيجيتك' };
   }
 
   close(): void {
-    this.db.close();
+    this.saveTrades();
   }
 }
