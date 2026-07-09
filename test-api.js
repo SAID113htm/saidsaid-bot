@@ -1,0 +1,1 @@
+const axios=require('axios');const apiKey='9a14fca3064b49208dafec8510143833';axios.get('https://api.twelvedata.com/quote',{params:{symbol:'EURUSD',apikey:apiKey}}).then(r=>console.log('OK:',JSON.stringify(r.data))).catch(e=>console.log('ERROR:',e.response?.data||e.message));

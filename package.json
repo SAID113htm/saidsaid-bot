@@ -1,0 +1,24 @@
+{
+  "name": "forex-analysis-bot",
+  "version": "1.0.0",
+  "description": "Professional Forex Analysis Telegram Bot",
+  "main": "dist/telegram/Bot.js",
+  "scripts": {
+    "dev": "ts-node src/telegram/Bot.ts",
+    "build": "tsc",
+    "start": "node dist/telegram/Bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.18.1",
+    "better-sqlite3": "^12.11.1",
+    "dotenv": "^16.6.1",
+    "sqlite3": "^6.0.1",
+    "telegraf": "^4.15.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.3.0"
+  }
+}
