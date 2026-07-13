@@ -70,7 +70,6 @@ export class AlertEngine {
       isActive: true,
       createdAt: new Date().toISOString(),
     };
-
     this.rules.push(newRule);
     this.saveRules();
     return newRule;
@@ -79,7 +78,6 @@ export class AlertEngine {
   removeRule(ruleId: string, userId: number): boolean {
     const initialLength = this.rules.length;
     this.rules = this.rules.filter(r => r.id !== ruleId || r.userId !== userId);
-    
     if (this.rules.length < initialLength) {
       this.saveRules();
       return true;
@@ -124,7 +122,6 @@ export class AlertEngine {
 
   private async checkRule(rule: AlertRule): Promise<TriggeredAlert | null> {
     const alertKey = rule.id + '_' + new Date().toDateString();
-    
     if (this.triggeredAlerts.has(alertKey)) {
       return null;
     }
@@ -132,7 +129,6 @@ export class AlertEngine {
     try {
       const quote = await this.yahoo.getQuote(rule.symbol);
       const currentPrice = parseFloat(quote.close);
-
       const d1Data = await this.yahoo.getTimeSeries(rule.symbol, '1day', 50);
 
       const d1Candles: Candle[] = d1Data.values.map((c: any) => ({
@@ -156,7 +152,6 @@ export class AlertEngine {
           }
           break;
         }
-
         case 'BOS': {
           const bosSmc = this.smc.analyze(d1Candles);
           if (this.checkBOS(bosSmc, rule.condition.direction)) {
@@ -165,7 +160,6 @@ export class AlertEngine {
           }
           break;
         }
-
         case 'CHOCH': {
           const chochSmc = this.smc.analyze(d1Candles);
           if (this.checkCHOCH(chochSmc, rule.condition.direction)) {
@@ -174,7 +168,6 @@ export class AlertEngine {
           }
           break;
         }
-
         case 'RSI': {
           const rsi = this.calculateRSI(d1Candles);
           const threshold = rule.condition.rsiThreshold || 30;
@@ -185,7 +178,6 @@ export class AlertEngine {
           }
           break;
         }
-
         case 'PRICE_TARGET': {
           const target = rule.condition.priceTarget || 0;
           if (target > 0 && this.priceReachedTarget(currentPrice, target, 0.001)) {
@@ -194,7 +186,6 @@ export class AlertEngine {
           }
           break;
         }
-
         case 'NEWS': {
           const highNews = await this.news.getHighImpactNews(rule.symbol);
           if (highNews.length > 0) {
@@ -207,12 +198,7 @@ export class AlertEngine {
 
       if (shouldTrigger && message) {
         this.triggeredAlerts.add(alertKey);
-        return {
-          rule,
-          message,
-          timestamp: new Date(),
-          currentPrice,
-        };
+        return { rule, message, timestamp: new Date(), currentPrice };
       }
     } catch (error) {
       console.error('❌ Error in checkRule for ' + rule.symbol + ':', error);
@@ -223,21 +209,18 @@ export class AlertEngine {
 
   private checkOrderBlock(smc: any, currentPrice: number, direction?: string): boolean {
     if (!smc || !smc.orderBlocks) return false;
-
     if (direction === 'BUY' && smc.orderBlocks.bullish?.length > 0) {
       return smc.orderBlocks.bullish.some((ob: any) => {
         const distance = Math.abs(currentPrice - ob.high) / currentPrice;
         return distance < 0.005;
       });
     }
-
     if (direction === 'SELL' && smc.orderBlocks.bearish?.length > 0) {
       return smc.orderBlocks.bearish.some((ob: any) => {
         const distance = Math.abs(currentPrice - ob.low) / currentPrice;
         return distance < 0.005;
       });
     }
-
     return false;
   }
 
@@ -273,7 +256,7 @@ export class AlertEngine {
   }
 
   private formatOrderBlockAlert(symbol: string, price: number, smc: any, direction?: string): string {
-    const dir = direction === 'BUY' ? 'شراء 📈' : direction === 'SELL' ? 'بيع 📉' : 'تداول';
+    const dir = direction === 'BUY' ? 'شراء 📈' : direction === 'SELL' ? 'بيع ' : 'تداول';
     let text = '🔔 **تنبيه: Order Block مهم!**\n\n';
     text += '━━━━━━━━━━━━━━━━━━━\n';
     text += '💱 **الزوج:** ' + symbol + '\n';
@@ -299,7 +282,7 @@ export class AlertEngine {
 
   private formatBOSAlert(symbol: string, price: number, smc: any, direction?: string): string {
     const isBullish = direction === 'BUY' || (smc.bos?.bullish && !direction);
-    const emoji = isBullish ? '' : '🔴';
+    const emoji = isBullish ? '🟢' : '🔴';
     const dir = isBullish ? 'صاعد' : 'هابط';
 
     let text = '🔄 **تنبيه: كسر هيكل (BOS)!**\n\n';
@@ -343,16 +326,16 @@ export class AlertEngine {
     text += '📈 **RSI:** ' + rsi.toFixed(1) + '\n';
     text += emoji + ' **المنطقة:** ' + zone + '\n';
     text += '━━━━━━━━━━━━━━━━━━━\n\n';
-    text += ' **التفسير:**\n';
+    text += '📝 **التفسير:**\n';
     text += isOversold 
       ? 'السعر في ذروة البيع - انعكاس صاعد محتمل 📈'
       : 'السعر في ذروة الشراء - تصحيح هابط محتمل 📉';
-    text += '\n\n **نصيحة:** انتظر تأكيد الانعكاس قبل الدخول';
+    text += '\n\n💡 **نصيحة:** انتظر تأكيد الانعكاس قبل الدخول';
     return text;
   }
 
   private formatPriceAlert(symbol: string, currentPrice: number, target: number): string {
-    let text = '🎯 **تم الوصول إلى السعر المستهدف!**\n\n';
+    let text = ' **تم الوصول إلى السعر المستهدف!**\n\n';
     text += '━━━━━━━━━━━━━━━━━━━\n';
     text += '💱 **الزوج:** ' + symbol + '\n';
     text += '📍 **السعر الحالي:** ' + currentPrice.toFixed(5) + '\n';
@@ -363,21 +346,36 @@ export class AlertEngine {
   }
 
   private formatNewsAlert(symbol: string, news: any[]): string {
+    if (news.length === 0) {
+      return '✅ **لا توجد أخبار عالية التأثير قادمة**\n\n' +
+             '💱 الزوج: ' + symbol + '\n' +
+             '━━━━━━━━━━━━━━━━━━━\n\n' +
+             '📊 السوق هادئ - يمكنك التداول بحرية';
+    }
+
     let text = '⚠️ **تنبيه: أخبار عالية التأثير قادمة!**\n\n';
     text += '━━━━━━━━━━━━━━━━━━━\n';
     text += '💱 **الزوج:** ' + symbol + '\n';
+    text += ' **عدد الأخبار:** ' + news.length + '\n';
     text += '━━━━━━━━━━━━━━━━━━━\n\n';
     
-    news.slice(0, 3).forEach((n: any) => {
-      text += '🔴 **' + n.title + '**\n';
-      text += '    ' + n.time + '\n';
-      text += '   💱 ' + n.currency + '\n\n';
+    news.slice(0, 5).forEach((n: any) => {
+      const title = n.titleAr || n.title;
+      const time = n.timeLocal || n.time;
+      const flag = n.flag || '💱';
+      
+      text += flag + ' **' + title + '**\n';
+      text += '    🕐 ' + time + '\n';
+      text += '    💱 ' + (n.currency || '') + '\n\n';
     });
 
-    text += '💡 **نصيحة:**\n';
-    text += '• أغلق صفقاتك المفتوحة أو وسّع الـ SL\n';
-    text += '• تجنب فتح صفقات جديدة قبل الخبر بـ 30 دقيقة\n';
-    text += '• انتظر 15 دقيقة بعد الخبر للتداول';
+    text += ' **نصائح التداول:**\n';
+    text += '• 🛑 أغلق صفقاتك المفتوحة أو وسّع الـ SL\n';
+    text += '• ⚠️ تجنب فتح صفقات جديدة قبل الخبر بـ 30 دقيقة\n';
+    text += '• ⏰ انتظر 15 دقيقة بعد الخبر للتداول\n';
+    text += '• 📊 راقب التقلبات - قد تكون حادة\n';
+    text += '• 🎯 استخدم حجم صفقة أصغر من المعتاد';
+    
     return text;
   }
 
@@ -407,7 +405,6 @@ export class AlertEngine {
 
   startMonitoring(intervalMinutes: number = 5): void {
     console.log('🔔 Starting alert monitoring (every ' + intervalMinutes + ' minutes)');
-    
     setInterval(async () => {
       try {
         const triggered = await this.checkAllAlerts();

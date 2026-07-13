@@ -1,101 +1,602 @@
+import { config } from '../config/env';
+import { TwelveDataClient } from '../providers/TwelveDataClient';
 import { YahooFinanceClient } from '../providers/YahooFinanceClient';
 import { SmartMoneyAnalyzer, Candle } from '../smartmoney/SmartMoney';
-import { PriceProvider, MarketData } from '../data/PriceProvider';
 import { NewsAnalyzer } from '../news/NewsAnalyzer';
-import { DecisionEngine, TradingSignal } from '../strategy/DecisionEngine';
-import { RiskManager } from '../risk/RiskManager';
-import { BarChartAnalyzer } from './BarChartAnalyzer';
 
 export interface AnalysisResult {
-  pair: string;
-  price: number;
-  trend: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  symbol: string;
+  decision: 'BUY' | 'SELL' | 'NEUTRAL';
   strength: number;
-  support: number[];
-  resistance: number[];
-  rsi: number;
-  recommendation: string;
-  timestamp: Date;
-  smartMoney?: any;
-  institutional?: TradingSignal;
+  confidence: number;
+  timeframes: {
+    MN: string;
+    W1: string;
+    D1: string;
+    H4: string;
+    H1: string;
+  };
+  smartMoney: {
+    trend: string;
+    bullishBOS: boolean;
+    bearishBOS: boolean;
+    bullishCHOCH: boolean;
+    bearishCHOCH: boolean;
+    bullishOrderBlocks: number;
+    bearishOrderBlocks: number;
+    bullishFVG: number;
+    bearishFVG: number;
+    liquiditySweeps: number;
+  };
+  entry: number;
+  stopLoss: number;
+  takeProfit1: number;
+  takeProfit2: number;
+  takeProfit3: number;
+  riskReward: number;
+  warnings: string[];
 }
 
 export class Analyzer {
-  private client: YahooFinanceClient;
-  private smartMoneyAnalyzer: SmartMoneyAnalyzer;
-  private priceProvider: PriceProvider;
-  private newsAnalyzer: NewsAnalyzer;
-  private decisionEngine: DecisionEngine;
-  private riskManager: RiskManager;
-  private barChartAnalyzer: BarChartAnalyzer;
+  private twelveData: TwelveDataClient;
+  private yahoo: YahooFinanceClient;
+  private smc: SmartMoneyAnalyzer;
+  private news: NewsAnalyzer;
 
   constructor() {
-    this.client = new YahooFinanceClient();
-    this.smartMoneyAnalyzer = new SmartMoneyAnalyzer();
-    this.priceProvider = new PriceProvider('');
-    this.newsAnalyzer = new NewsAnalyzer();
-    this.decisionEngine = new DecisionEngine();
-    this.riskManager = new RiskManager();
-    this.barChartAnalyzer = new BarChartAnalyzer();
+    this.twelveData = new TwelveDataClient(config.twelveData.apiKey);
+    this.yahoo = new YahooFinanceClient();
+    this.smc = new SmartMoneyAnalyzer();
+    this.news = new NewsAnalyzer();
   }
 
-  async analyze(pair: string): Promise<AnalysisResult> {
-    console.log('🔍 Starting analysis for:', pair);
+  async analyze(symbol: string): Promise<AnalysisResult> {
+    try {
+      const candles = await this.getCandles(symbol);
+      const smcAnalysis: any = this.smc.analyze(candles);
+      const currentPrice = candles[candles.length - 1].close;
+
+      const timeframes = this.analyzeTimeframes(candles);
+      const signals = this.generateSignals(smcAnalysis, timeframes);
+      const entryPoints = this.calculateEntryPoints(currentPrice, signals.direction);
+      const riskReward = this.calculateRiskReward(entryPoints);
+
+      const strength = this.calculateStrength(signals, timeframes);
+      const confidence = this.calculateConfidence(strength, riskReward);
+
+      const warnings: string[] = [];
+      if (riskReward < 2) {
+        warnings.push(`نسبة R:R (${riskReward.toFixed(2)}) أقل من الحد الأدنى (2)`);
+      }
+
+      // استخراج بيانات Smart Money بشكل مرن
+      const smartMoneyData = this.extractSmartMoneyData(smcAnalysis);
+
+      return {
+        symbol,
+        decision: signals.direction,
+        strength,
+        confidence,
+        timeframes,
+        smartMoney: smartMoneyData,
+        entry: entryPoints.entry,
+        stopLoss: entryPoints.stopLoss,
+        takeProfit1: entryPoints.takeProfit1,
+        takeProfit2: entryPoints.takeProfit2,
+        takeProfit3: entryPoints.takeProfit3,
+        riskReward,
+        warnings,
+      };
+    } catch (error) {
+      throw new Error('Analysis failed: ' + (error as Error).message);
+    }
+  }
+
+  // دالة مرنة لاستخراج بيانات Smart Money
+  private extractSmartMoneyData(smc: any) {
+    const trend = smc.trend || smc.marketStructure || smc.direction || 'NEUTRAL';
     
-    const data = await this.client.getTimeSeries(pair, '1day', 100);
-    const quote = await this.client.getQuote(pair);
-
-    const price = parseFloat(quote.close);
-    const candles = data.values;
-
-    const formattedCandles: Candle[] = candles.map((c: any) => ({
-      time: c.datetime,
-      open: parseFloat(c.open),
-      high: parseFloat(c.high),
-      low: parseFloat(c.low),
-      close: parseFloat(c.close),
-      volume: parseFloat(c.volume),
-    }));
-
-    const rsi = this.calculateRSI(candles);
-    const trend = this.determineTrend(candles);
-    const support = this.calculateSupport(candles);
-    const resistance = this.calculateResistance(candles);
-    const smartMoney = this.smartMoneyAnalyzer.analyze(formattedCandles);
+    // BOS - قد يكون object أو boolean
+    const bos = smc.bos || {};
+    const bullishBOS = bos.bullish === true || bos === true || (typeof bos === 'object' && bos.bullish);
+    const bearishBOS = bos.bearish === true || (typeof bos === 'object' && bos.bearish);
+    
+    // CHOCH
+    const choch = smc.choch || {};
+    const bullishCHOCH = choch.bullish === true || choch === true || (typeof choch === 'object' && choch.bullish);
+    const bearishCHOCH = choch.bearish === true || (typeof choch === 'object' && choch.bearish);
+    
+    // Order Blocks
+    const orderBlocks = smc.orderBlocks || {};
+    const bullishOrderBlocks = Array.isArray(orderBlocks.bullish) ? orderBlocks.bullish.length : 0;
+    const bearishOrderBlocks = Array.isArray(orderBlocks.bearish) ? orderBlocks.bearish.length : 0;
+    
+    // FVG
+    const fvg = smc.fvg || {};
+    const bullishFVG = Array.isArray(fvg.bullish) ? fvg.bullish.length : 0;
+    const bearishFVG = Array.isArray(fvg.bearish) ? fvg.bearish.length : 0;
+    
+    // Liquidity Sweeps
+    const liquiditySweeps = Array.isArray(smc.liquiditySweeps) ? smc.liquiditySweeps.length : 0;
 
     return {
-      pair: pair.toUpperCase(),
-      price,
-      trend,
-      strength: this.calculateStrength(rsi),
-      support,
-      resistance,
-      rsi: Math.round(rsi * 100) / 100,
-      recommendation: this.getRecommendation(trend, rsi, smartMoney),
-      timestamp: new Date(),
-      smartMoney,
+      trend: String(trend).toUpperCase(),
+      bullishBOS: !!bullishBOS,
+      bearishBOS: !!bearishBOS,
+      bullishCHOCH: !!bullishCHOCH,
+      bearishCHOCH: !!bearishCHOCH,
+      bullishOrderBlocks,
+      bearishOrderBlocks,
+      bullishFVG,
+      bearishFVG,
+      liquiditySweeps,
     };
   }
 
-  async getInstitutionalAnalysis(pair: string): Promise<string> {
+  async getInstitutionalAnalysis(symbol: string): Promise<string> {
     try {
-      console.log('️ Starting institutional analysis for:', pair);
-      
-      const marketData = await this.priceProvider.getFullMarketData(pair);
-      const candles = marketData.candles.D1.map((c: any) => ({
-        time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
-      }));
-      
-      const smartMoney = this.smartMoneyAnalyzer.analyze(candles);
-      const news = await this.newsAnalyzer.getHighImpactNews(pair);
-      const signal = this.decisionEngine.analyze(marketData, smartMoney, news);
-      const barPatterns = this.barChartAnalyzer.analyze(candles);
+      const analysis = await this.analyze(symbol);
+      const highImpactNews = await this.news.getHighImpactNews(symbol);
+      const newsAlert = this.news.formatNewsAlert(symbol, highImpactNews);
 
-      return this.formatInstitutionalReport(signal, marketData, news, barPatterns);
-    } catch (error: any) {
-      console.error('❌ Institutional analysis error:', error);
-      return '❌ خطأ في التحليل المؤسسي: ' + error.message;
+      if (highImpactNews.length > 0) {
+        analysis.warnings.push(`${highImpactNews.length} أخبار عالية التأثير قريبة`);
+      }
+
+      const { overallScore, finalVerdict, reasons } = this.calculateOverallScore(analysis);
+      const overallEvaluation = this.formatOverallEvaluation(overallScore, finalVerdict, reasons);
+
+      return this.formatInstitutionalAnalysis(analysis, newsAlert, overallEvaluation);
+    } catch (error) {
+      throw new Error('Institutional analysis failed: ' + (error as Error).message);
     }
+  }
+
+  private calculateOverallScore(analysis: AnalysisResult): {
+    overallScore: number;
+    finalVerdict: string;
+    reasons: string[];
+  } {
+    const reasons: string[] = [];
+    let score = 0;
+
+    // 1. وضوح الاتجاه (30 نقطة)
+    const tfValues = Object.values(analysis.timeframes);
+    const bullishCount = tfValues.filter(v => v === 'BULLISH').length;
+    const bearishCount = tfValues.filter(v => v === 'BEARISH').length;
+    const neutralCount = tfValues.filter(v => v === 'NEUTRAL').length;
+    
+    if (bullishCount >= 3 || bearishCount >= 3) {
+      score += 30;
+      reasons.push(`✅ وضوح الاتجاه: ${bullishCount >= 3 ? 'صاعد' : 'هابط'} (${bullishCount >= 3 ? bullishCount : bearishCount}/5 فريمات)`);
+    } else if (bullishCount >= 2 || bearishCount >= 2) {
+      score += 15;
+      reasons.push(`️ وضوح الاتجاه: متوسط (${bullishCount >= 2 ? bullishCount : bearishCount}/5 فريمات)`);
+    } else {
+      reasons.push(`❌ وضوح الاتجاه: ضعيف (${neutralCount}/5 فريمات محايدة)`);
+    }
+
+    // 2. Smart Money (25 نقطة)
+    const smcScore = this.calculateSmartMoneyScore(analysis.smartMoney);
+    score += smcScore;
+    if (smcScore >= 20) {
+      reasons.push(`✅ Smart Money: قوي`);
+    } else if (smcScore >= 10) {
+      reasons.push(`⚠️ Smart Money: متوسط`);
+    } else {
+      reasons.push(`❌ Smart Money: ضعيف أو متناقض`);
+    }
+
+    // 3. نسبة R:R (25 نقطة)
+    if (analysis.riskReward >= 3) {
+      score += 25;
+      reasons.push(`✅ R:R ممتاز (1:${analysis.riskReward.toFixed(2)})`);
+    } else if (analysis.riskReward >= 2) {
+      score += 20;
+      reasons.push(`✅ R:R جيد (1:${analysis.riskReward.toFixed(2)})`);
+    } else if (analysis.riskReward >= 1.5) {
+      score += 10;
+      reasons.push(`⚠️ R:R مقبول (1:${analysis.riskReward.toFixed(2)})`);
+    } else {
+      reasons.push(`❌ R:R ضعيف (1:${analysis.riskReward.toFixed(2)})`);
+    }
+
+    // 4. الثقة (20 نقطة)
+    if (analysis.confidence >= 75) {
+      score += 20;
+      reasons.push(`✅ الثقة عالية (${analysis.confidence}%)`);
+    } else if (analysis.confidence >= 60) {
+      score += 15;
+      reasons.push(`✅ الثقة جيدة (${analysis.confidence}%)`);
+    } else if (analysis.confidence >= 50) {
+      score += 10;
+      reasons.push(`⚠️ الثقة متوسطة (${analysis.confidence}%)`);
+    } else {
+      reasons.push(`❌ الثقة منخفضة (${analysis.confidence}%)`);
+    }
+
+    // 5. خصم الأخبار
+    const newsWarning = analysis.warnings.find(w => w.includes('أخبار'));
+    if (newsWarning) {
+      score -= 15;
+      reasons.push(`️ خصم بسبب الأخبار عالية التأثير`);
+    }
+
+    let finalVerdict: string;
+    if (score >= 80) {
+      finalVerdict = '🟢 فرصة ممتازة - تداول بثقة';
+    } else if (score >= 65) {
+      finalVerdict = '🟢 فرصة جيدة - يمكنك التداول';
+    } else if (score >= 50) {
+      finalVerdict = '🟡 فرصة متوسطة - تداول بحذر';
+    } else if (score >= 35) {
+      finalVerdict = '🟠 فرصة ضعيفة - يُنصح بالانتظار';
+    } else {
+      finalVerdict = '🔴 لا تتداول - ظروف السوق غير مناسبة';
+    }
+
+    return {
+      overallScore: Math.max(0, Math.min(100, score)),
+      finalVerdict,
+      reasons,
+    };
+  }
+
+  private calculateSmartMoneyScore(smartMoney: AnalysisResult['smartMoney']): number {
+    let score = 0;
+    
+    if (smartMoney.trend === 'BULLISH' || smartMoney.trend === 'BEARISH') {
+      score += 8;
+    }
+    
+    if (smartMoney.bullishBOS || smartMoney.bearishBOS) {
+      score += 5;
+    }
+    
+    if (smartMoney.bullishCHOCH || smartMoney.bearishCHOCH) {
+      score += 5;
+    }
+    
+    const totalOB = smartMoney.bullishOrderBlocks + smartMoney.bearishOrderBlocks;
+    if (totalOB >= 2 && totalOB <= 5) {
+      score += 4;
+    } else if (totalOB > 5) {
+      score += 2;
+    }
+    
+    const totalFVG = smartMoney.bullishFVG + smartMoney.bearishFVG;
+    if (totalFVG >= 1 && totalFVG <= 4) {
+      score += 3;
+    }
+    
+    return Math.min(25, score);
+  }
+
+  private formatOverallEvaluation(
+    score: number,
+    verdict: string,
+    reasons: string[]
+  ): string {
+    let text = '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n';
+    text += '📊 **التقييم الشامل للفرصة**\n';
+    text += '━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n';
+
+    const progressBar = this.createProgressBar(score);
+    text += `${progressBar}\n\n`;
+
+    text += `🎯 **الدرجة النهائية: ${score}/100**\n\n`;
+
+    text += '**📋 تفاصيل التقييم:**\n';
+    reasons.forEach(reason => {
+      text += `• ${reason}\n`;
+    });
+    text += '\n';
+
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `${verdict}\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    if (score < 50) {
+      text += '💡 **نصائح:**\n';
+      text += '• انتظر وضوح الاتجاه\n';
+      text += '• ابحث عن أزواج أخرى بفرص أفضل\n';
+      text += '• راجع التحليل لاحقاً\n';
+    } else if (score < 70) {
+      text += '💡 **نصائح:**\n';
+      text += '• استخدم حجم صفقة أصغر\n';
+      text += '• التزم بوقف الخسارة بدقة\n';
+      text += '• راقب الأخبار القريبة\n';
+    } else {
+      text += '💡 **نصائح:**\n';
+      text += '• الفرصة جيدة - تداول بثقة\n';
+      text += '• التزم بخطة التداول\n';
+      text += '• راقب إدارة المخاطر\n';
+    }
+
+    return text;
+  }
+
+  private createProgressBar(score: number): string {
+    const totalBlocks = 20;
+    const filledBlocks = Math.round((score / 100) * totalBlocks);
+    const emptyBlocks = totalBlocks - filledBlocks;
+    
+    let bar = '🟢'.repeat(Math.min(filledBlocks, 10));
+    if (filledBlocks > 10) {
+      bar += '🟡'.repeat(filledBlocks - 10);
+    }
+    bar += '⚪'.repeat(emptyBlocks);
+    
+    return `**[${bar}]** ${score}%`;
+  }
+
+  private async getCandles(symbol: string): Promise<Candle[]> {
+    try {
+      const data = await this.yahoo.getTimeSeries(symbol, '1day', 100);
+      return data.values.map((c: any) => ({
+        time: c.datetime,
+        open: parseFloat(c.open),
+        high: parseFloat(c.high),
+        low: parseFloat(c.low),
+        close: parseFloat(c.close),
+        volume: parseFloat(c.volume),
+      }));
+    } catch (error) {
+      throw new Error('Failed to fetch candles: ' + (error as Error).message);
+    }
+  }
+
+  private analyzeTimeframes(candles: Candle[]): {
+    MN: string;
+    W1: string;
+    D1: string;
+    H4: string;
+    H1: string;
+  } {
+    return {
+      MN: this.analyzeTimeframe(candles, 30),
+      W1: this.analyzeTimeframe(candles, 13),
+      D1: this.analyzeTimeframe(candles, 30),
+      H4: this.analyzeTimeframe(candles, 20),
+      H1: this.analyzeTimeframe(candles, 14),
+    };
+  }
+
+  private analyzeTimeframe(candles: Candle[], period: number): string {
+    if (candles.length < period) return 'NEUTRAL';
+    
+    const recent = candles.slice(-period);
+    const first = recent[0].close;
+    const last = recent[recent.length - 1].close;
+    const change = ((last - first) / first) * 100;
+    
+    if (change > 2) return 'BULLISH';
+    if (change < -2) return 'BEARISH';
+    return 'NEUTRAL';
+  }
+
+  private generateSignals(smc: any, timeframes: any): {
+    direction: 'BUY' | 'SELL' | 'NEUTRAL';
+    reasons: string[];
+  } {
+    const reasons: string[] = [];
+    let bullishSignals = 0;
+    let bearishSignals = 0;
+
+    const trend = smc.trend || smc.marketStructure || smc.direction || 'NEUTRAL';
+    if (String(trend).toUpperCase().includes('BULL')) bullishSignals++;
+    if (String(trend).toUpperCase().includes('BEAR')) bearishSignals++;
+    
+    const bos = smc.bos || {};
+    if (bos.bullish) bullishSignals++;
+    if (bos.bearish) bearishSignals++;
+    
+    const choch = smc.choch || {};
+    if (choch.bullish) bullishSignals++;
+    if (choch.bearish) bearishSignals++;
+
+    const tfValues = Object.values(timeframes);
+    tfValues.forEach(tf => {
+      if (tf === 'BULLISH') bullishSignals++;
+      if (tf === 'BEARISH') bearishSignals++;
+    });
+
+    if (bullishSignals > bearishSignals + 2) {
+      return { direction: 'BUY', reasons };
+    }
+    if (bearishSignals > bullishSignals + 2) {
+      return { direction: 'SELL', reasons };
+    }
+    return { direction: 'NEUTRAL', reasons };
+  }
+
+  private calculateEntryPoints(currentPrice: number, direction: 'BUY' | 'SELL' | 'NEUTRAL') {
+    const atr = currentPrice * 0.01;
+    
+    if (direction === 'BUY') {
+      return {
+        entry: currentPrice,
+        stopLoss: currentPrice - atr * 1.5,
+        takeProfit1: currentPrice + atr * 2,
+        takeProfit2: currentPrice + atr * 3,
+        takeProfit3: currentPrice + atr * 4,
+      };
+    } else if (direction === 'SELL') {
+      return {
+        entry: currentPrice,
+        stopLoss: currentPrice + atr * 1.5,
+        takeProfit1: currentPrice - atr * 2,
+        takeProfit2: currentPrice - atr * 3,
+        takeProfit3: currentPrice - atr * 4,
+      };
+    }
+    
+    return {
+      entry: currentPrice,
+      stopLoss: currentPrice - atr,
+      takeProfit1: currentPrice + atr,
+      takeProfit2: currentPrice + atr * 1.5,
+      takeProfit3: currentPrice + atr * 2,
+    };
+  }
+
+  private calculateRiskReward(entryPoints: {
+    entry: number;
+    stopLoss: number;
+    takeProfit1: number;
+  }): number {
+    const risk = Math.abs(entryPoints.entry - entryPoints.stopLoss);
+    const reward = Math.abs(entryPoints.takeProfit1 - entryPoints.entry);
+    return risk > 0 ? reward / risk : 0;
+  }
+
+  private calculateStrength(signals: any, timeframes: any): number {
+    let strength = 0;
+    
+    if (signals.direction !== 'NEUTRAL') strength += 30;
+    
+    const tfValues = Object.values(timeframes);
+    const alignedCount = tfValues.filter(tf => 
+      (signals.direction === 'BUY' && tf === 'BULLISH') ||
+      (signals.direction === 'SELL' && tf === 'BEARISH')
+    ).length;
+    
+    strength += (alignedCount / tfValues.length) * 40;
+    
+    return Math.min(100, Math.max(-100, strength));
+  }
+
+  private calculateConfidence(strength: number, riskReward: number): number {
+    let confidence = 50;
+    
+    if (strength > 50) confidence += 20;
+    if (strength > 70) confidence += 10;
+    
+    if (riskReward >= 2) confidence += 15;
+    if (riskReward >= 3) confidence += 5;
+    
+    return Math.min(100, Math.max(0, confidence));
+  }
+
+  formatAnalysis(analysis: AnalysisResult): string {
+    let text = `📊 **تحليل ${analysis.symbol}**\n\n`;
+    text += '━━━━━━━━━━━━━━━━━━━\n';
+    text += `📈 **القرار:** ${this.getDecisionEmoji(analysis.decision)} ${analysis.decision}\n`;
+    text += `💪 **القوة:** ${analysis.strength.toFixed(0)}/100\n`;
+    text += ` **الثقة:** ${analysis.confidence.toFixed(0)}%\n`;
+    text += '━━━━━━━━━━━━━━━━━━━\n\n';
+
+    text += ' **تحليل الفريمات:**\n';
+    Object.entries(analysis.timeframes).forEach(([tf, trend]) => {
+      text += `  ${this.getTrendEmoji(trend)} ${tf}: ${trend}\n`;
+    });
+    text += '\n';
+
+    text += '🔍 **Smart Money Concepts:**\n';
+    text += `  📍 الاتجاه: ${analysis.smartMoney.trend}\n`;
+    text += `  🔄 BOS: ${analysis.smartMoney.bullishBOS ? 'صاعد ✅' : analysis.smartMoney.bearishBOS ? 'هابط 🔴' : 'لا يوجد'}\n`;
+    text += `   CHOCH: ${analysis.smartMoney.bullishCHOCH ? 'صاعد ✅' : analysis.smartMoney.bearishCHOCH ? 'هابط 🔴' : 'لا يوجد'}\n`;
+    text += `  📦 Order Blocks: ${analysis.smartMoney.bullishOrderBlocks + analysis.smartMoney.bearishOrderBlocks} (صاعد: ${analysis.smartMoney.bullishOrderBlocks}, هابط: ${analysis.smartMoney.bearishOrderBlocks})\n`;
+    text += `  ⚡ FVG: ${analysis.smartMoney.bullishFVG + analysis.smartMoney.bearishFVG} (صاعد: ${analysis.smartMoney.bullishFVG}, هابط: ${analysis.smartMoney.bearishFVG})\n`;
+    text += `  💧 Liquidity Sweeps: ${analysis.smartMoney.liquiditySweeps}\n\n`;
+
+    text += '🎯 **نقاط الدخول:**\n';
+    text += `• الدخول: ${analysis.entry.toFixed(5)}\n`;
+    text += `• وقف الخسارة: ${analysis.stopLoss.toFixed(5)}\n`;
+    text += `• جني الربح 1: ${analysis.takeProfit1.toFixed(5)}\n`;
+    text += `• جني الربح 2: ${analysis.takeProfit2.toFixed(5)}\n`;
+    text += `• جني الربح 3: ${analysis.takeProfit3.toFixed(5)}\n\n`;
+
+    text += `📊 **نسبة R:R:** 1:${analysis.riskReward.toFixed(2)}\n`;
+    if (analysis.riskReward < 2) {
+      text += '❌ **تحذير:** R:R أقل من 1:2 - الصفقة غير مقبولة\n\n';
+    }
+
+    if (analysis.warnings.length > 0) {
+      text += '⚠️ **تحذيرات:**\n';
+      analysis.warnings.forEach(warning => {
+        text += `  ⚠️ ${warning}\n`;
+      });
+      text += '\n';
+    }
+
+    return text;
+  }
+
+  private formatInstitutionalAnalysis(
+    analysis: AnalysisResult,
+    newsAlert: string,
+    overallEvaluation: string
+  ): string {
+    let text = `🏛️ **التحليل المؤسسي - ${analysis.symbol}**\n\n`;
+    text += '━━━━━━━━━━━━━━━━━━━\n';
+    text += `📊 **القرار:** ${this.getDecisionEmoji(analysis.decision)} ${analysis.decision}\n`;
+    text += ` **القوة:** ${analysis.strength.toFixed(0)}/100\n`;
+    text += `🎯 **الثقة:** ${analysis.confidence.toFixed(0)}%\n`;
+    text += '━━━━━━━━━━━━━━━━━━━\n\n';
+
+    text += '📈 **تحليل الفريمات:**\n';
+    const tfWeights: Record<string, number> = { MN: 40, W1: 30, D1: 20, H4: 10, H1: 5 };
+    Object.entries(analysis.timeframes).forEach(([tf, trend]) => {
+      const weight = tfWeights[tf] || 10;
+      text += `  ${this.getTrendEmoji(trend)} ${tf}: ${trend} - الوزن ${weight}%\n`;
+    });
+    text += '\n';
+
+    text += '🔍 **Smart Money Concepts:**\n';
+    const trendEmoji = analysis.smartMoney.trend === 'BULLISH' ? '🟢' : analysis.smartMoney.trend === 'BEARISH' ? '🔴' : '🟡';
+    text += `  ${trendEmoji} الاتجاه: ${analysis.smartMoney.trend}\n`;
+    text += `  🔄 BOS: ${analysis.smartMoney.bullishBOS ? 'صاعد ✅' : analysis.smartMoney.bearishBOS ? 'هابط 🔴' : 'لا يوجد'}\n`;
+    text += `  ⚡ CHOCH: ${analysis.smartMoney.bullishCHOCH ? 'صاعد ✅' : analysis.smartMoney.bearishCHOCH ? 'هابط 🔴' : 'لا يوجد'}\n`;
+    text += `  📍 Order Blocks صاعد: ${analysis.smartMoney.bullishOrderBlocks}\n`;
+    text += `   Order Blocks هابط: ${analysis.smartMoney.bearishOrderBlocks}\n`;
+    text += `  ⚡️ FVG صاعد: ${analysis.smartMoney.bullishFVG}\n`;
+    text += `  ⚡️ FVG هابط: ${analysis.smartMoney.bearishFVG}\n`;
+    text += `  💧 Liquidity Sweeps: ${analysis.smartMoney.liquiditySweeps}\n\n`;
+
+    text += '🎯 **نقاط الدخول:**\n';
+    text += `• الدخول: ${analysis.entry.toFixed(5)}\n`;
+    text += `• وقف الخسارة: ${analysis.stopLoss.toFixed(5)}\n`;
+    text += `• جني الربح 1: ${analysis.takeProfit1.toFixed(5)}\n`;
+    text += `• جني الربح 2: ${analysis.takeProfit2.toFixed(5)}\n`;
+    text += `• جني الربح 3: ${analysis.takeProfit3.toFixed(5)}\n\n`;
+
+    text += `📊 **نسبة R:R:** 1:${analysis.riskReward.toFixed(2)}\n`;
+    if (analysis.riskReward < 2) {
+      text += '❌ **تحذير:** R:R أقل من 1:2 - الصفقة غير مقبولة\n\n';
+    } else {
+      text += '✅ **ممتاز:** R:R مقبول للتداول\n\n';
+    }
+
+    if (analysis.warnings.length > 0) {
+      text += '⚠️ **تحذيرات:**\n';
+      analysis.warnings.forEach(warning => {
+        text += `  ️ ${warning}\n`;
+      });
+      text += '\n';
+    }
+
+    text += overallEvaluation;
+
+    if (newsAlert && !newsAlert.includes('لا توجد أخبار')) {
+      text += '\n' + newsAlert;
+    }
+
+    return text;
+  }
+
+  private getDecisionEmoji(decision: string): string {
+    switch (decision) {
+      case 'BUY': return '';
+      case 'SELL': return '';
+      default: return '🟡';
+    }
+  }
+
+  private getTrendEmoji(trend: string): string {
+    if (trend === 'BULLISH') return '';
+    if (trend === 'BEARISH') return '🔴';
+    return '';
   }
 
   calculateRisk(params: {
@@ -106,215 +607,33 @@ export class Analyzer {
     riskPercent: number;
     accountBalance: number;
   }): string {
-    const direction: 'BUY' | 'SELL' = params.entry > params.stopLoss ? 'BUY' : 'SELL';
+    const riskAmount = (params.accountBalance * params.riskPercent) / 100;
+    const riskPerUnit = Math.abs(params.entry - params.stopLoss);
+    const positionSize = riskAmount / riskPerUnit;
+    const reward = Math.abs(params.takeProfit - params.entry);
+    const riskReward = reward / riskPerUnit;
+    const potentialProfit = positionSize * reward;
 
-    const calculation = this.riskManager.calculatePosition({
-      ...params,
-      direction,
-    });
-
-    const validation = this.riskManager.validateRisk({
-      riskPercent: params.riskPercent,
-      riskRewardRatio: calculation.riskRewardRatio,
-      confidence: 'MEDIUM',
-    });
-
-    let text = '🧮 **حاسبة المخاطرة الاحترافية**\n\n';
-    text += '💱 **الزوج:** ' + calculation.symbol + '\n';
-    text += '📈 **الاتجاه:** ' + (calculation.direction === 'BUY' ? 'شراء ' : 'بيع 🔴') + '\n\n';
-    
-    text += '💰 **تفاصيل الصفقة:**\n';
-    text += '• الدخول: `' + calculation.entry.toFixed(5) + '`\n';
-    text += '• وقف الخسارة: `' + calculation.stopLoss.toFixed(5) + '`\n';
-    text += '• جني الربح: `' + calculation.takeProfit.toFixed(5) + '`\n\n';
-    
-    text += '💵 **إدارة المخاطر:**\n';
-    text += '• رصيد الحساب: $' + calculation.accountBalance.toLocaleString() + '\n';
-    text += '• نسبة المخاطرة: ' + calculation.riskPercent + '%\n';
-    text += '• المبلغ المعرض للخطر: $' + calculation.riskAmount.toFixed(2) + '\n';
-    text += '• **حجم الصفقة:** ' + calculation.positionSize + ' لوت\n';
-    text += '• الربح المتوقع: $' + calculation.potentialProfit.toFixed(2) + '\n';
-    text += '• **نسبة R:R:** 1:' + calculation.riskRewardRatio.toFixed(2) + '\n\n';
-
-    if (calculation.riskRewardRatio < 2.0) {
-      text += '⚠️ **تحذير:** نسبة R:R أقل من 1:2 - الصفقة غير مقبولة\n\n';
-    }
-
-    if (validation.warnings.length > 0) {
-      text += '⚠️ **تحذيرات:**\n';
-      validation.warnings.forEach(w => text += '• ' + w + '\n');
-    } else {
-      text += '✅ الصفقة ضمن معايير المخاطرة المقبولة';
-    }
-
-    return text;
-  }
-
-  formatAnalysis(result: AnalysisResult): string {
-    const trendEmoji: any = {
-      'BULLISH': '🟢',
-      'BEARISH': '🔴',
-      'NEUTRAL': '🟡'
-    };
-
-    let text = '';
-    text += '📊 **تحليل ' + result.pair + '**\n\n';
-    text += '💰 السعر الحالي: `' + result.price.toFixed(5) + '`\n\n';
-    text += '📈 الاتجاه: ' + trendEmoji[result.trend] + ' ' + this.getTrendText(result.trend) + '\n';
-    text += '💪 القوة: ' + result.strength + '%\n';
-    text += ' RSI: ' + result.rsi + '\n\n';
-    
-    text += ' **مستويات الدعم:**\n';
-    result.support.forEach((s: number, i: number) => {
-      text += '   ' + (i + 1) + '. `' + s.toFixed(5) + '`\n';
-    });
-    text += '\n';
-    
-    text += '📈 **مستويات المقاومة:**\n';
-    result.resistance.forEach((r: number, i: number) => {
-      text += '   ' + (i + 1) + '. `' + r.toFixed(5) + '`\n';
-    });
-    text += '\n';
-    
-    if (result.smartMoney) {
-      text += this.smartMoneyAnalyzer.formatSmartMoney(result.smartMoney);
-      text += '\n';
-    }
-    
-    text += '💡 **التوصية:** ' + result.recommendation + '\n\n';
-    text += '⏰ ' + result.timestamp.toLocaleTimeString('ar-SA');
-
-    return text;
-  }
-
-  private formatInstitutionalReport(signal: TradingSignal, marketData: MarketData, news: any[], barPatterns: any[]): string {
-    const directionEmoji: any = {
-      'STRONG_BUY': '🟢🟢 شراء قوي جداً',
-      'BUY': '🟢 شراء',
-      'NEUTRAL': ' محايد - انتظار',
-      'SELL': '🔴 بيع',
-      'STRONG_SELL': '🔴🔴 بيع قوي جداً',
-    };
-
-    let text = '️ **التحليل المؤسسي - ' + signal.symbol + '**\n\n';
-    
+    let text = '🧮 **حاسبة المخاطرة**\n\n';
     text += '━━━━━━━━━━━━━━━━━━━\n';
-    text += '📊 **القرار:** ' + directionEmoji[signal.direction] + '\n';
-    text += '💪 **القوة:** ' + (signal.score > 0 ? '+' : '') + signal.score + '/100\n';
-    text += '🎯 **الثقة:** ' + signal.confidence + '%\n';
+    text += `💱 **الزوج:** ${params.symbol}\n`;
+    text += `💰 **الرصيد:** $${params.accountBalance.toLocaleString()}\n`;
+    text += `⚠️ **المخاطرة:** ${params.riskPercent}% ($${riskAmount.toFixed(2)})\n`;
     text += '━━━━━━━━━━━━━━━━━━━\n\n';
-    
-    text += '📈 **تحليل الفريمات:**\n';
-    text += '  ' + (signal.timeframeBreakdown.MN === 'BULLISH' ? '' : signal.timeframeBreakdown.MN === 'BEARISH' ? '🔴' : '🟡') + ' MN (شهري): ' + signal.timeframeBreakdown.MN + ' - الوزن 40%\n';
-    text += '  ' + (signal.timeframeBreakdown.W1 === 'BULLISH' ? '🟢' : signal.timeframeBreakdown.W1 === 'BEARISH' ? '🔴' : '') + ' W1 (أسبوعي): ' + signal.timeframeBreakdown.W1 + ' - الوزن 30%\n';
-    text += '  ' + (signal.timeframeBreakdown.D1 === 'BULLISH' ? '🟢' : signal.timeframeBreakdown.D1 === 'BEARISH' ? '🔴' : '') + ' D1 (يومي): ' + signal.timeframeBreakdown.D1 + ' - الوزن 20%\n';
-    text += '  ' + (signal.timeframeBreakdown.H4 === 'BULLISH' ? '🟢' : signal.timeframeBreakdown.H4 === 'BEARISH' ? '🔴' : '') + ' H4: ' + signal.timeframeBreakdown.H4 + ' - الوزن 10%\n';
-    text += '  ' + (signal.timeframeBreakdown.H1 === 'BULLISH' ? '🟢' : signal.timeframeBreakdown.H1 === 'BEARISH' ? '🔴' : '🟡') + ' H1: ' + signal.timeframeBreakdown.H1 + '\n\n';
 
-    text += '🔍 **Smart Money Concepts:**\n';
-    signal.smcDetails.forEach((detail: string) => {
-      text += '  ' + detail + '\n';
-    });
-    text += '\n';
+    text += '📊 **نتائج الحساب:**\n';
+    text += `• حجم الصفقة: ${positionSize.toFixed(4)} lot\n`;
+    text += `• الربح المحتمل: $${potentialProfit.toFixed(2)}\n`;
+    text += `• نسبة R:R: 1:${riskReward.toFixed(2)}\n\n`;
 
-    if (barPatterns.length > 0) {
-      text += this.barChartAnalyzer.formatPatterns(barPatterns);
-      text += '\n';
+    if (riskReward >= 2) {
+      text += '✅ **الصفقة مقبولة** - نسبة المخاطرة/العائد جيدة\n';
+    } else if (riskReward >= 1.5) {
+      text += '⚠️ **الصفقة مقبولة بحذر** - R:R متوسط\n';
+    } else {
+      text += ' **الصفقة غير مقبولة** - R:R ضعيف جداً\n';
     }
-
-    if (signal.direction !== 'NEUTRAL') {
-      text += ' **نقاط الدخول:**\n';
-      text += '• الدخول: `' + signal.entry.toFixed(5) + '`\n';
-      text += '• وقف الخسارة: `' + signal.stopLoss.toFixed(5) + '`\n';
-      text += '• جني الربح 1: `' + signal.takeProfit1.toFixed(5) + '`\n';
-      text += '• جني الربح 2: `' + signal.takeProfit2.toFixed(5) + '`\n';
-      text += '• جني الربح 3: `' + signal.takeProfit3.toFixed(5) + '`\n\n';
-      
-      text += '📊 **نسبة R:R:** 1:' + signal.riskRewardRatio.toFixed(2) + '\n';
-      if (signal.riskRewardRatio < 2.0) {
-        text += '❌ **تحذير:** R:R أقل من 1:2 - الصفقة غير مقبولة\n\n';
-      }
-    }
-
-    if (signal.warnings.length > 0) {
-      text += '⚠️ **تحذيرات:**\n';
-      signal.warnings.forEach((w: string) => text += '  ' + w + '\n');
-      text += '\n';
-    }
-
-    if (news.length > 0) {
-      text += this.newsAnalyzer.formatNewsForSymbol(signal.symbol, news);
-    }
-    
-    text += '\n⏰ ' + signal.timestamp.toLocaleString('ar-SA');
 
     return text;
-  }
-
-  private calculateRSI(candles: any[], period: number = 14): number {
-    if (candles.length < period + 1) return 50;
-    let gains = 0, losses = 0;
-    for (let i = 1; i <= period; i++) {
-      const change = parseFloat(candles[i - 1].close) - parseFloat(candles[i].close);
-      if (change > 0) gains += change;
-      else losses += Math.abs(change);
-    }
-    const avgGain = gains / period;
-    const avgLoss = losses / period;
-    if (avgLoss === 0) return 100;
-    const rs = avgGain / avgLoss;
-    return 100 - (100 / (1 + rs));
-  }
-
-  private determineTrend(candles: any[]): 'BULLISH' | 'BEARISH' | 'NEUTRAL' {
-    if (candles.length < 20) return 'NEUTRAL';
-    const recent = candles.slice(0, 20);
-    const older = candles.slice(20, 40);
-    const recentAvg = recent.reduce((sum: number, c: any) => sum + parseFloat(c.close), 0) / recent.length;
-    const olderAvg = older.reduce((sum: number, c: any) => sum + parseFloat(c.close), 0) / older.length;
-    const change = ((recentAvg - olderAvg) / olderAvg) * 100;
-    if (change > 2) return 'BULLISH';
-    if (change < -2) return 'BEARISH';
-    return 'NEUTRAL';
-  }
-
-  private calculateSupport(candles: any[]): number[] {
-    const lows = candles.slice(0, 30).map((c: any) => parseFloat(c.low));
-    const min = Math.min(...lows);
-    return [min, min * 0.998, min * 0.996];
-  }
-
-  private calculateResistance(candles: any[]): number[] {
-    const highs = candles.slice(0, 30).map((c: any) => parseFloat(c.high));
-    const max = Math.max(...highs);
-    return [max, max * 1.002, max * 1.004];
-  }
-
-  private calculateStrength(rsi: number): number {
-    return Math.round(Math.abs(50 - rsi) * 2);
-  }
-
-  private getRecommendation(trend: string, rsi: number, smartMoney: any): string {
-    let score = 0;
-    if (trend === 'BULLISH') score += 2;
-    if (trend === 'BEARISH') score -= 2;
-    if (rsi < 30) score += 1;
-    if (rsi > 70) score -= 1;
-    if (smartMoney) {
-      if (smartMoney.structure === 'BULLISH') score += 2;
-      if (smartMoney.structure === 'BEARISH') score -= 2;
-      if (smartMoney.bos?.bullish) score += 1;
-      if (smartMoney.bos?.bearish) score -= 1;
-    }
-    if (score >= 5) return 'شراء قوي ';
-    if (score >= 3) return 'شراء 📈';
-    if (score <= -5) return 'بيع قوي 🔴';
-    if (score <= -3) return 'بيع 📉';
-    return 'انتظار ';
-  }
-
-  private getTrendText(trend: string): string {
-    const texts: any = { 'BULLISH': 'صاعد', 'BEARISH': 'هابط', 'NEUTRAL': 'جانبي' };
-    return texts[trend];
   }
 }
